@@ -1,5 +1,6 @@
 import { accountForm, optionalRecoveryEmail } from './account.js';
 import {words, layouts, freshState} from './data.js';
+import {searchDictionary} from './dictionary-service.js';
 const $ = s => document.querySelector(s), esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const paths = {
   search:'<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/>',
@@ -15,6 +16,8 @@ const paths = {
   menu:'<path d="M4 6h16M4 12h16M4 18h16"/>'
 };
 const icon = n => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[n] || paths.book}</svg>`;
+let searchRequest = 0, searchTimer = null, remoteSearchHTML = null;
+const dictionaryIdToIndex = new Map();
 let state = freshState(),
   demo = false,
   page = 'search',
@@ -57,7 +60,7 @@ function heading(title, sub = '') {
   return `<div class="heading"><h1>${title}</h1>${sub ? `<p>${sub}</p>`:''}</div>`
 }
 function row(w, origin = 'Chinese') {
-  return `<button class="wordrow" data-word="${w.id}" data-origin="${origin}"><span class="han">${ch(w)}</span><span class="wordtext"><div class="pinyin">${w.py}</div><div class="meaning">${w.en}</div></span><span class="hsk">HSK ${w.hsk}</span><span class="arrow">›</span></button>`
+  return `<button class="wordrow" data-word="${w.id}" data-origin="${origin}"><span class="han">${esc(ch(w))}</span><span class="wordtext"><div class="pinyin">${esc(w.py)}</div><div class="meaning">${esc(w.en)}</div></span><span class="hsk">${w.hsk ? 'HSK ' + w.hsk : ''}</span><span class="arrow">›</span></button>`
 }
 function wordlist(ids, origin = 'Chinese') {
   return `<div class="card wordlist">${ids.map(id => row(words[id], origin)).join('') || '<div class="empty">No words here yet.</div>'}</div>`
@@ -70,7 +73,7 @@ function protectedPage() {
 }
 const navs = [['search', 'Search'], ['saved', 'Saved Words'], ['review', 'Spaced Review'], ['quiz', 'Quiz'], ['scan', 'Scan'], ['history', 'Search History']];
 function render() {
-  $('#app').innerHTML = `<aside class="sidebar">${btn('✕', 'menu', 'sidebar-close ghost')}<div class="brand"><span class="seal">看</span><div>kan</div></div><nav class="nav">${navs.map(([p, n]) => `<button data-nav="${p}" class="${page === p ? 'active':''}">${icon(p)}${n}${p === 'review' && demo ? `<span class="count">${dueIds().length}</span>`:''}</button>`).join('')}</nav><div class="sidebar-bottom"><nav class="nav"><button data-nav="settings" class="${page === 'settings' ? 'active':''}">${icon('settings')}Settings & Account</button></nav><div class="account"><span class="avatar">${demo ? '学':'人'}</span><div>${demo ? 'Demo learner':'Guest'}<small>${demo ? 'Temporary workspace':'Not signed in'}</small></div></div></div></aside><main class="main"><header class="topbar"><div>${btn(icon('menu'), 'menu', 'mobile-menu ghost')}<span class="breadcrumb">${navs.find(n => n[0] === page)?.[1] || 'Settings & Account'}</span></div><div class="topright"><span class="tag">FRONTEND PREVIEW</span><span class="muted">${traditional ? '繁體中文':'简体中文'}</span>${btn(demo ? 'Demo account':'Sign in', demo ? 'account':'auth-login', 'small ghost')}</div></header><div id="content">${content()}</div><footer class="footer"><span>Sample dictionary · ${demo ? 'Demo changes reset on refresh':'No guest data is stored'}</span></footer></main>`;
+  $('#app').innerHTML = `<aside class="sidebar">${btn('✕', 'menu', 'sidebar-close ghost')}<div class="brand"><span class="seal">看</span><div>kan</div></div><nav class="nav">${navs.map(([p, n]) => `<button data-nav="${p}" class="${page === p ? 'active':''}">${icon(p)}${n}${p === 'review' && demo ? `<span class="count">${dueIds().length}</span>`:''}</button>`).join('')}</nav><div class="sidebar-bottom"><nav class="nav"><button data-nav="settings" class="${page === 'settings' ? 'active':''}">${icon('settings')}Settings & Account</button></nav><div class="account"><span class="avatar">${demo ? '学':'人'}</span><div>${demo ? 'Demo learner':'Guest'}<small>${demo ? 'Temporary workspace':'Not signed in'}</small></div></div></div></aside><main class="main"><header class="topbar"><div>${btn(icon('menu'), 'menu', 'mobile-menu ghost')}<span class="breadcrumb">${navs.find(n => n[0] === page)?.[1] || 'Settings & Account'}</span></div><div class="topright"><span class="tag">FRONTEND PREVIEW</span><span class="muted">${traditional ? '繁體中文':'简体中文'}</span>${btn(demo ? 'Demo account':'Sign in', demo ? 'account':'auth-login', 'small ghost')}</div></header><div id="content">${content()}</div><footer class="footer"><span>Dictionary search · ${demo ? 'Demo changes reset on refresh':'No guest data is stored'}</span></footer></main>`;
   bindInputs()
 }
 function content() {
@@ -93,16 +96,48 @@ function content() {
   }
 }
 function searchPage() {
-  return `${heading('Search')}<div class="searchbox">${icon('search')}<input id="search" aria-label="Search dictionary" placeholder="Search Chinese, pinyin, or English…" value="${esc(query)}" autocomplete="off"><select id="mode" aria-label="Search type">${['Auto', 'English', 'Pinyin'].map(x => `<option ${mode === x ? 'selected':''}>${x}</option>`).join('')}</select></div><div class="hint">Examples: ${['学习', 'peng you', 'discover', '今天我们一起去学校'].map(x => `<button data-query="${x}">${x}</button>`).join('')}</div><div class="columns"><section><div class="sectiontitle"><h2 id="results-title">${query ? 'Search results':'Sample words'}</h2></div><div id="results">${searchResults()}</div></section><aside class="aside"><div class="card study"><h2>Spaced Review</h2>${demo ? `<div class="study-count">${dueIds().length}<small>words ready to review</small></div>${btn('Start review ' + icon('arrow'), 'start-review', 'primary')}<div class="stats"><div><strong>${state.saved.size}</strong><small>saved words</small></div><div><strong>${state.completed.length}</strong><small>completed</small></div></div>`:`${btn('Open demo ' + icon('arrow'), 'demo', 'primary')}`}</div><div class="card quick"><button data-nav="quiz"><span class="badgeicon">${icon('quiz')}</span><span><strong>Quiz</strong></span><span>↗</span></button><button data-nav="scan"><span class="badgeicon">${icon('scan')}</span><span><strong>Scan</strong></span><span>↗</span></button></div></aside></div>`
+  return `${heading('Search')}<div class="searchbox">${icon('search')}<input id="search" aria-label="Search dictionary" placeholder="Search Chinese, pinyin, or English…" value="${esc(query)}" autocomplete="off"><select id="mode" aria-label="Search type">${['Auto', 'English', 'Pinyin'].map(x => `<option ${mode === x ? 'selected':''}>${x}</option>`).join('')}</select></div><div class="hint">Examples: ${['学习', 'peng you', 'discover', '今天我们一起去学校'].map(x => `<button data-query="${x}">${x}</button>`).join('')}</div><div class="columns"><section><div class="sectiontitle"><h2 id="results-title">${query ? 'Search results':'Dictionary'}</h2></div><div id="results">${remoteSearchHTML ?? (query ? '<div class="card empty">Searching…</div>' : '<div class="card empty">Enter Chinese, pinyin, or English to search the dictionary.</div>')}</div></section><aside class="aside"><div class="card study"><h2>Spaced Review</h2>${demo ? `<div class="study-count">${dueIds().length}<small>words ready to review</small></div>${btn('Start review ' + icon('arrow'), 'start-review', 'primary')}<div class="stats"><div><strong>${state.saved.size}</strong><small>saved words</small></div><div><strong>${state.completed.length}</strong><small>completed</small></div></div>`:`${btn('Open demo ' + icon('arrow'), 'demo', 'primary')}`}</div><div class="card quick"><button data-nav="quiz"><span class="badgeicon">${icon('quiz')}</span><span><strong>Quiz</strong></span><span>↗</span></button><button data-nav="scan"><span class="badgeicon">${icon('scan')}</span><span><strong>Scan</strong></span><span>↗</span></button></div></aside></div>`
 }
 const normalize = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f\s1-5]/g, '');
 function searchResults() {
-  if(!query.trim())return wordlist([0, 1, 2, 3, 4]);
-  const q = query.trim().toLowerCase();
-  let found = words.filter(w => (mode !== 'Pinyin' && mode !== 'English' && (w.ch.includes(q) || w.tr.includes(q))) || (mode !== 'English' && normalize(w.py).includes(normalize(q))) || (mode !== 'Pinyin' && w.en.toLowerCase().includes(q)));
-  if(found.length)return wordlist(found.map(w => w.id), mode === 'Auto' ? (/[\u3400-\u9fff]/.test(q) ? 'Chinese':found.some(w => normalize(w.py).includes(normalize(q))) ? 'Pinyin':'English'):mode);
-  if(/[\u3400-\u9fff]/.test(q) && q.length > 3)return `<div class="card"><div class="eyebrow">INTERACTIVE READING</div>${tokens(q)}<p class="muted">Tap a recognized word to explore it. Unlinked characters aren’t in this sample dictionary.</p></div>`;
-  return '<div class="card empty">No sample matches yet.<p>This preview contains 20 curated entries. Full dictionary coverage comes with the dictionary backend slice.</p></div>'
+  return remoteSearchHTML ?? '<div class="card empty">Enter Chinese, pinyin, or English to search.</div>';
+}
+function scheduleDictionarySearch() {
+  clearTimeout(searchTimer);
+  const ticket = ++searchRequest;
+  remoteSearchHTML = null;
+  const results = $('#results');
+  if (!results) return;
+  if (!query.trim()) {
+    results.innerHTML = '<div class="card empty">Enter Chinese, pinyin, or English to search the dictionary.</div>';
+    return;
+  }
+  results.innerHTML = '<div class="card empty">Searching dictionary…</div>';
+  searchTimer = setTimeout(async () => {
+    try {
+      const entries = await searchDictionary(query, mode);
+      if (ticket !== searchRequest || page !== 'search') return;
+      const indices = entries.map(entry => {
+        let index = dictionaryIdToIndex.get(entry.id);
+        if (index === undefined) {
+          index = words.length;
+          dictionaryIdToIndex.set(entry.id, index);
+          words.push({id:index, dbId:entry.id, ch:entry.simplified, tr:entry.traditional,
+            py:entry.pinyin, en:(entry.definitions || []).join('; '), hsk:entry.hsk_level,
+            ex:'', translation:''});
+        }
+        return index;
+      });
+      remoteSearchHTML = indices.length ? wordlist(indices, mode === 'Auto' ?
+        (/[\u3400-\u9fff]/.test(query) ? 'Chinese' : 'Pinyin') : mode) :
+        '<div class="card empty">No dictionary matches found.</div>';
+      $('#results').innerHTML = remoteSearchHTML;
+    } catch (error) {
+      if (ticket !== searchRequest || page !== 'search') return;
+      remoteSearchHTML = `<div class="card empty">${esc(error.message)}</div>`;
+      $('#results').innerHTML = remoteSearchHTML;
+    }
+  }, 250);
 }
 function tokens(text, origin = 'Chinese') {
   let out = '',
@@ -128,7 +163,7 @@ function openWord(id, origin = 'Chinese', nested = false) {
     state.history.unshift({id, origin})
   }
   const w = words[id];
-  modal(`${detailStack.length > 1 ? btn('← Back to previous word', 'detail-back', 'ghost small'):''}<div class="detailhan">${ch(w)}</div><div class="row spread"><span class="pinyin" style="font-size:18px">${w.py}</span><span class="hsk">HSK ${w.hsk} · sample label</span></div><div class="muted">${traditional ? 'Simplified: ' + w.ch:'Traditional: ' + w.tr}</div><div class="detaildefs">${w.en}</div><div class="eyebrow">IN CONTEXT</div><div class="example">${tokens(w.ex, origin)}<span class="muted">${w.translation}</span></div><div class="toolbar">${btn(demo && state.saved.has(id) ? 'Manage saved word':'＋ Save word', 'save-panel:' + id, 'primary full')}</div>`)
+  modal(`${detailStack.length > 1 ? btn('← Back to previous word', 'detail-back', 'ghost small'):''}<div class="detailhan">${ch(w)}</div><div class="row spread"><span class="pinyin" style="font-size:18px">${w.py}</span><span class="hsk">${w.hsk ? 'HSK ' + w.hsk : 'HSK level unavailable'}</span></div><div class="muted">${traditional ? 'Simplified: ' + w.ch:'Traditional: ' + w.tr}</div><div class="detaildefs">${esc(w.en)}</div>${w.ex ? `<div class="eyebrow">IN CONTEXT</div><div class="example">${tokens(w.ex, origin)}<span class="muted">${esc(w.translation)}</span></div>` : ''}<div class="toolbar">${btn(demo && state.saved.has(id) ? 'Manage saved word':'＋ Save word', 'save-panel:' + id, 'primary full')}</div>`)
 }
 function savePanel(id) {
   if(!demo) {
@@ -202,12 +237,12 @@ function auth(type) {
 function bindInputs() {
   if($('#search'))$('#search').oninput = e => {
     query = e.target.value;
-    $('#results').innerHTML = searchResults();
-    $('#results-title').textContent = query ? 'Search results':'Sample words'
+    scheduleDictionarySearch();
+    $('#results-title').textContent = query ? 'Search results':'Dictionary'
   };
   if($('#mode'))$('#mode').onchange = e => {
     mode = e.target.value;
-    $('#results').innerHTML = searchResults()
+    scheduleDictionarySearch()
   };
   if($('#quiz-source'))$('#quiz-source').onchange = e => {
     $('#source-options').innerHTML = e.target.value === 'folders' ? `<label>Choose one or more folders</label>${state.folders.map(f => `<label class="check"><input type="checkbox" name="quizfolder" value="${f.id}">${esc(f.name)}</label>`).join('')}`:`<label>HSK levels</label><div class="chips">${[1, 2, 3, 4, 5, 6].map(n => `<label class="check"><input type="checkbox" name="hsk" value="${n}" checked>${n}</label>`).join('')}</div>`
@@ -588,7 +623,9 @@ document.addEventListener('click', e => {
   if(t.dataset.word !== undefined)return openWord( + t.dataset.word, t.dataset.origin || 'Chinese', !!$('#modal').children.length);
   if(t.dataset.query !== undefined) {
     query = t.dataset.query;
+    remoteSearchHTML = null;
     render();
+    scheduleDictionarySearch();
     $('#search').focus();
     return
   }
@@ -612,3 +649,4 @@ document.addEventListener('keydown', e => {
   }
 });
 render();
+if (query) scheduleDictionarySearch();
